@@ -30,10 +30,13 @@ We will use awesome [dbmate](https://github.com/amacneil/dbmate) migration tool 
 Run in the terminal in our project root:
 ```bash
 dbmate new init_migration
-# Output: Creating migration: db/migrations/20250129053023_init_migration.sql
 ```
-Lets write our first database migration:
+Output:
+```bash
+Creating migration: db/migrations/20250129053023_init_migration.sql
+```
 
+Lets write our first database migration:
 ```sql
 -- migrate:up
 CREATE EXTENSION IF NOT EXISTS citext;
@@ -145,7 +148,6 @@ dbmate --url postgres://postgres:admin@pg.docker.loc/auth_example?sslmode=disabl
 ```
 
 Next, let's write sql queries for retrieving our users & their permissions. Here we will use [sqlc](https://github.com/sqlc-dev/sqlc) for type-safe code generation from our sql queries, and [pgx](https://github.com/jackc/pgx/v5) as its backend
-
 ```bash
 go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest
 go get github.com/jackc/pgx/v5
@@ -153,7 +155,6 @@ go get github.com/jackc/pgx/v5/pgxpool
 ```
 
 Create sqlc.yaml at the root of our project:
-
 ```yaml
 version: "2"
 sql:
