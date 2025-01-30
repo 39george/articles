@@ -149,6 +149,7 @@ Next, let's write sql queries for retrieving our users & their permissions. Here
 ```bash
 go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest
 go get github.com/jackc/pgx/v5
+go get github.com/jackc/pgx/v5/pgxpool
 ```
 
 Create sqlc.yaml at the root of our project:
@@ -206,20 +207,19 @@ Go code should appear in the db/sqlc folder.
 
 Let's write some go code! Add our dependencies:
 ```bash
+go get github.com/gin-gonic/gin
 go get github.com/alexedwards/scs/v2
 go get github.com/39george/scs_gin_adapter
-go get github.com/39george/scs_redisstore
-go get github.com/39george/authpher
+go get github.com/39george/scs_redisstore go get github.com/39george/authpher
 go get github.com/redis/go-redis/v9
 ```
 
-Create `internal/appstate.go`, it will hold our app's state:
+Create `auth_example/internal/appstate.go`, it will hold our app's state:
 ```go
 package internal
 
 import (
 	ginAdapter "github.com/39george/scs_gin_adapter"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
 	"auth_example/db/sqlc"
@@ -235,7 +235,7 @@ type AppState struct {
 }
 ```
 
-Also we will use [argon2](https://en.wikipedia.org/wiki/Argon2), modern password-hashing function for securing our password, create `internal/argon2/argon2.go`:
+Also we will use [argon2](https://en.wikipedia.org/wiki/Argon2), modern password-hashing function for securing our password, create `auth_example/internal/argon2/argon2.go`:
 ```go
 package argon2
 
@@ -403,7 +403,7 @@ func decodeHash(encodedHash string) (p *params, salt, hash []byte, err error) {
 }
 ```
 
-Next step, we will implement our actual authentication backend, create `internal/auth/backend.go`, we could just fetch user data from postgres, but for reducing database read rate we will cache that data for limited time in redis:
+Next step, we will implement our actual authentication backend, create `auth_example/internal/auth/backend.go`, we could just fetch user data from postgres, but for reducing database read rate we will cache that data for limited time in redis:
 ```go
 package auth
 
@@ -412,7 +412,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
-    "log/slog"
+	"log/slog"
 	"strconv"
 
 	"github.com/39george/authpher"
@@ -471,10 +471,10 @@ func (u *User) SessionAuthHash() []byte {
 }
 
 type Credentials struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-	Email    string `json:"email"`
-    Group    string `json:"group"`
+  Username string `form:"username" json:"username"`
+	Password string `form:"password" json:"password"`
+	Email    string `form:"email"    json:"email"`
+	Group    string `form:"group"    json:"group"`
 }
 
 type MyBackend struct {
@@ -501,7 +501,7 @@ func (mb MyBackend) Authenticate(
 	// Run argon2 verification
 	user := User(data)
 	match, err := argon2.ComparePasswordAndHash(
-		creds.Password.Expose(),
+		creds.Password,
 		user.PasswordHash,
 	)
 	if err != nil {
@@ -531,7 +531,7 @@ func (mb MyBackend) GetUser(
 	} else if len(m) != 0 {
 		user, err := UserFromMap(m)
 		if err != nil {
-			l.Logger.Warn(fmt.Errorf("failed to get user from map: %w", err).Error())
+			slog.Warn(fmt.Errorf("failed to get user from map: %w", err).Error())
 		} else {
 			// Return pointer!
 			return &user, nil
@@ -554,11 +554,11 @@ func (mb MyBackend) GetUser(
 	// Cache user
 	_, err = mb.RedisPool.HSet(ctx, rKey, user.IntoMap()).Result()
 	if err != nil {
-		l.Logger.Error(fmt.Errorf("failed to cache user: %w", err).Error())
+		slog.Error(fmt.Errorf("failed to cache user: %w", err).Error())
 	}
 	_, err = mb.RedisPool.Expire(ctx, rKey, time.Minute).Result()
 	if err != nil {
-		l.Logger.Error(fmt.Errorf("failed to set expiration: %w", err).Error())
+		slog.Error(fmt.Errorf("failed to set expiration: %w", err).Error())
 	}
 
 	// Return pointer!
@@ -609,13 +609,13 @@ func (mb MyBackend) GetGroupPermissions(
 	// Cache permissions
 	_, err = mb.RedisPool.SAdd(ctx, rKey, data).Result()
 	if err != nil {
-		l.Logger.Error(
+		slog.Error(
 			fmt.Errorf("failed to cache user permissions: %w", err).Error(),
 		)
 	}
 	_, err = mb.RedisPool.Expire(ctx, rKey, time.Minute).Result()
 	if err != nil {
-		l.Logger.Error(fmt.Errorf("failed to set expiration: %w", err).Error())
+		slog.Error(fmt.Errorf("failed to set expiration: %w", err).Error())
 	}
 
 	return perms, nil
@@ -628,24 +628,27 @@ package auth_example
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"time"
+ 	"http"
 
+	"github.com/39george/authpher"
 	"github.com/39george/authpher/adapters/authgin"
 	"github.com/39george/authpher/sessions/ginsessions"
 	ginAdapter "github.com/39george/scs_gin_adapter"
 	scsRedisStore "github.com/39george/scs_redisstore"
 	"github.com/alexedwards/scs/v2"
 	"github.com/gin-gonic/gin"
+	"github.com/gin-gonic/gin/binding"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
 	"auth_example/db/sqlc"
 	"auth_example/internal"
+	"auth_example/internal/argon2"
+	"auth_example/internal/auth"
 )
 
 type Application struct {
@@ -660,7 +663,7 @@ func BuildApplication(router *gin.Engine) Application {
     pgConnStr := fmt.Sprintf(
 		"host=%s port=%d user=%s password=%s dbname=%s sslmode=allow",
 		"localhost",
-		"5432",
+		5432,
 		"postgres",
 		"admin",
 		"auth_example",
@@ -676,11 +679,10 @@ func BuildApplication(router *gin.Engine) Application {
 	sessionManager.Store = scsRedisStore.New(redisClient)
 	sessionManager.Lifetime = 24 * time.Hour
 	sessionAdapter := ginAdapter.New(sessionManager)
-	panicOnError(err, "Failed to create session redis store")
 
-	appState := &appstate.AppState{
+	appState := &internal.AppState{
 		Sqlc:            sqlcObj,
-		RedisPool:       redisClient,
+		RedisClient:     redisClient,
 		Session:         sessionAdapter,
 	}
 
@@ -706,30 +708,30 @@ func BuildApplication(router *gin.Engine) Application {
 	router.Use(authgin.Auth[string, auth.Credentials](
 		auth.MyBackend{
 			PgPool:    appState.Sqlc,
-			RedisPool: appState.RedisPool,
+			RedisPool: appState.RedisClient,
 		},
 		&ginsessions.GinSessions{Store: sessionAdapter}),
 	)
 
     openRoutes := router.Group("/open")
     userRoutes := router.Group("/user")
-    userRoutes.Use(userlogin.PermissionRequired[string, auth.Credentials]("starter"))
+    userRoutes.Use(authgin.PermissionRequired[string, auth.Credentials]("starter"))
     adminRoutes := router.Group("/admin")
-    adminRoutes.Use(userlogin.PermissionRequired[string, auth.Credentials]("admin"))
+    adminRoutes.Use(authgin.PermissionRequired[string, auth.Credentials]("admin"))
 
     // Define handlers
     userRoutes.GET("/test", func(c *gin.Context) {})
     adminRoutes.GET("/test", func(c *gin.Context) {})
     openRoutes.GET("/test", func(c *gin.Context) {})
-    openRoutes.GET("/login", func(c *gin.Context) {
+    openRoutes.POST("/login", func(c *gin.Context) {
         credentials := new(auth.Credentials)
         err := c.ShouldBindWith(credentials, binding.JSON)
         if err != nil {
-            c.AbortWithStatusJSON(http.StatusBadRequest, httputil.Err(err))
+            c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
             return
         }
-        authSession, _ := c.Get(userlogin.AuthContextString)
-        aS := authSession.(*userlogin.AuthSession[string, auth.Credentials])
+        authSession, _ := c.Get(authpher.AuthContextString)
+        aS := authSession.(*authpher.AuthSession[string, auth.Credentials])
         user, err := aS.Authenticate(c, *credentials)
         if err != nil {
             c.AbortWithError(http.StatusUnauthorized, err)
@@ -739,23 +741,23 @@ func BuildApplication(router *gin.Engine) Application {
             u := user.(*auth.User)
             err = aS.Login(c, u)
             if err != nil {
-                log.Printf("Failed to login user: %v\n", err)
+                slog.Warn("Failed to login user", "error", err.Error())
             }
         } else {
             c.AbortWithStatus(http.StatusUnauthorized)
         }
     })
     openRoutes.POST("/signup", func(c *gin.Context) {
-        s, _ := c.Get(appstate.Label)
-        state := s.(*appstate.AppState)
+        s, _ := c.Get(internal.AppStateLabel)
+        state := s.(*internal.AppState)
 
         creds := new(auth.Credentials)
         err := c.ShouldBindWith(creds, binding.FormPost)
         if err != nil {
-            c.AbortWithStatusJSON(http.StatusBadRequest, httputil.Err(err))
+            c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
             return
         }
-        passwordHash, err := argon2.GenWithParams(argon2.LightParams, password.Pass().Expose())
+        passwordHash, err := argon2.GenWithParams(argon2.LightParams, creds.Password)
         if err != nil {
             c.AbortWithStatus(http.StatusInternalServerError)
             return
@@ -823,7 +825,7 @@ package main
 import (
 	"github.com/gin-gonic/gin"
 
-	"auth_exapmle"
+	"auth_example"
 )
 
 func main() {
@@ -837,3 +839,70 @@ Now we should can run our application with:
 ```bash
 go run main.go
 ```
+
+## Testing
+
+Now lets test our open handler with curl:
+```bash
+curl -i localhost:8080/open/test
+```
+You should get:
+```http
+HTTP/1.1 200 OK
+Vary: Cookie
+Date: Thu, 30 Jan 2025 12:45:47 GMT
+Content-Length: 0
+```
+
+Try to get access to protected route:
+```bash
+curl -i -X GET localhost:8080/user/test
+```
+You will get:
+```http
+HTTP/1.1 401 Unauthorized
+Vary: Cookie
+Date: Thu, 30 Jan 2025 13:07:35 GMT
+Content-Length: 0
+```
+
+Then we will create new account with command:
+```bash
+ curl -i -X POST -H 'Content-Type: application/x-www-form-urlencoded' -d 'username=user1&password=pass&email=email1@mail.com&group=group.users-starter' localhost:8080/open/signup
+```
+Output should be:
+```http
+HTTP/1.1 200 OK
+Vary: Cookie
+Date: Thu, 30 Jan 2025 13:00:03 GMT
+Content-Length: 0
+```
+
+And now login to our account (we use `-c` curl flag to store response cookies into a file, simulating web browser session):
+```bash
+curl -i -X POST -c cookie.txt -H 'Content-Type: application/json' -d '{"username":"user1","password":"pass"}' localhost:8080/open/login
+```
+Response:
+```http
+HTTP/1.1 200 OK
+Cache-Control: no-cache="Set-Cookie"
+Set-Cookie: session=yoP9sQprjrBeTbbEdxO_pa_eGCenKnvmUFqjNfY4kqA; Path=/; Expires=Fri, 31 Jan 2025 13:09:02 GMT; Max-Age=86400; HttpOnly; SameSite=Lax
+Vary: Cookie
+Date: Thu, 30 Jan 2025 13:09:02 GMT
+Content-Length: 0
+```
+
+After that you should have access to protected endpoint:
+```bash
+curl -i -X GET -b cookie.txt localhost:8080/user/test
+```
+Response:
+```http
+HTTP/1.1 200 OK
+Vary: Cookie
+Date: Thu, 30 Jan 2025 13:10:59 GMT
+Content-Length: 0
+```
+
+If you want, you can go further and create more accounts for testing various permissions for our groups!
+That's all.
