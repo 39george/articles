@@ -836,14 +836,14 @@ func main() {
     app.RunUntilStopped()
 }
 ```
-Now we should can run our application with:
+Now we can run our application with:
 ```bash
 go run main.go
 ```
 
 ## Testing
 
-Now lets test our open handler with curl:
+Now let's test our open handler with curl:
 ```bash
 curl -i localhost:8080/open/test
 ```
@@ -867,7 +867,7 @@ Date: Thu, 30 Jan 2025 13:07:35 GMT
 Content-Length: 0
 ```
 
-Then we will create new account with command:
+Then we will create a new account with command:
 ```bash
  curl -i -X POST -H 'Content-Type: application/x-www-form-urlencoded' -d 'username=user1&password=pass&email=email1@mail.com&group=group.users-starter' localhost:8080/open/signup
 ```
@@ -879,7 +879,7 @@ Date: Thu, 30 Jan 2025 13:00:03 GMT
 Content-Length: 0
 ```
 
-And now login to our account (we use `-c` curl flag to store response cookies into a file, simulating web browser session):
+And now login to our account (we use `-c` curl flag to dump response cookie into a file, simulating web browser session):
 ```bash
 curl -i -X POST -c cookie.txt -H 'Content-Type: application/json' -d '{"username":"user1","password":"pass"}' localhost:8080/open/login
 ```
