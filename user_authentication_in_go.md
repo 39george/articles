@@ -906,4 +906,5 @@ Content-Length: 0
 ```
 
 If you want, you can go further and create more accounts for testing various permissions for our groups!
+
 That's all, you can find full code at the [repo](https://github.com/39george/articles/tree/main/code/auth_example).
